@@ -20,6 +20,25 @@ This is a [Rojo](https://rojo.space) project — Luau source you sync into Roblo
 Studio. There is no `.rbxl` in the repo; the entire map is generated at runtime,
 so a fresh sync gives you a playable game with nothing to model by hand.
 
+### Windows
+
+Double-click **`START-HERE.cmd`**.
+
+It finds Rojo, downloads it into this folder if you don't have it, installs the
+Roblox Studio plugin, and starts the sync server. Then in Studio: open a new
+baseplate, **Plugins → Rojo → Connect**, allow the localhost prompt, press
+**Play**.
+
+If you'd rather just get a place file to double-click:
+
+```powershell
+.\START-HERE.ps1 -Build
+```
+
+(PowerShell blocking the script? `powershell -ExecutionPolicy Bypass -File .\START-HERE.ps1`)
+
+### macOS / Linux, or if you already have Rojo
+
 ```bash
 rojo serve          # then connect from the Rojo plugin in Studio
 # or
@@ -103,6 +122,8 @@ Billionaire Mentor.
 ## Project structure
 
 ```
+START-HERE.cmd              Windows: double-click this
+START-HERE.ps1              the setup script it runs
 default.project.json        Rojo mapping
 src/
   shared/                   ReplicatedStorage.Shared — data, read by both sides

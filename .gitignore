@@ -7,3 +7,6 @@
 # Editor / tooling
 .vscode/
 sourcemap.json
+
+# Rojo downloaded by START-HERE.ps1
+rojo.exe
