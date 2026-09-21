@@ -20,16 +20,27 @@
     Ignore any Rojo already on your system and fetch a private copy into this
     folder. Useful if your existing install is misbehaving.
 
+.PARAMETER Port
+    Port to serve on. Defaults to 34872, which is what the Studio plugin
+    expects. The script moves to a free port automatically if this one is taken
+    by something that isn't Rojo.
+
+.PARAMETER Force
+    Don't ask before stopping a Rojo server that is already running.
+
 .EXAMPLE
     .\START-HERE.ps1
     .\START-HERE.ps1 -Build
     .\START-HERE.ps1 -ForceDownload
+    .\START-HERE.ps1 -Port 34873
 #>
 [CmdletBinding()]
 param(
     [switch]$Build,
     [switch]$SkipPlugin,
-    [switch]$ForceDownload
+    [switch]$ForceDownload,
+    [int]$Port = 34872,
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -220,13 +231,106 @@ if (-not $SkipPlugin) {
     }
 }
 
+# --- Make sure the port is actually free ----------------------------------
+
+<#
+    Rojo crashes rather than reporting a friendly message when its port is
+    taken, and the usual cause is a sync server you already have running --
+    often from a second copy of this folder, which would quietly sync the wrong
+    files. Sort it out before starting rather than after crashing.
+#>
+function Test-PortBusy {
+    param([int]$Number)
+
+    try {
+        $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $Number)
+        $listener.Start()
+        $listener.Stop()
+        return $false
+    } catch {
+        return $true
+    }
+}
+
+function Get-PortOwner {
+    param([int]$Number)
+
+    # Get-NetTCPConnection is Windows-only; absence just means we can't name the
+    # process, which is not fatal.
+    try {
+        $conn = Get-NetTCPConnection -LocalPort $Number -State Listen -ErrorAction Stop |
+            Select-Object -First 1
+        return Get-Process -Id $conn.OwningProcess -ErrorAction Stop
+    } catch {
+        return $null
+    }
+}
+
+function Find-FreePort {
+    param([int]$Start)
+
+    for ($candidate = $Start; $candidate -lt ($Start + 20); $candidate++) {
+        if (-not (Test-PortBusy $candidate)) { return $candidate }
+    }
+    throw "Couldn't find a free port near $Start."
+}
+
+if (Test-PortBusy $Port) {
+    Write-Step "Port $Port is already in use."
+
+    $owner = Get-PortOwner $Port
+
+    if ($owner -and $owner.ProcessName -match 'rojo') {
+        Write-Warn "A Rojo server is already running (PID $($owner.Id))."
+        Write-Warn "If it's serving a different copy of this project, Studio will sync the wrong files."
+
+        $stop = $Force
+        if (-not $stop) {
+            Write-Host ""
+            Write-Host "  [S] Stop it and serve this folder instead  (recommended)" -ForegroundColor White
+            Write-Host "  [K] Keep it running and just use it" -ForegroundColor Gray
+            Write-Host ""
+            $answer = Read-Host "  Which? [S/K]"
+            $stop = ($answer -eq '' -or $answer -match '^[Ss]')
+        }
+
+        if ($stop) {
+            Write-Ok "Stopping PID $($owner.Id)..."
+            try {
+                Stop-Process -Id $owner.Id -Force -ErrorAction Stop
+                Start-Sleep -Milliseconds 700
+            } catch {
+                Write-Warn "Couldn't stop it: $($_.Exception.Message)"
+            }
+
+            if (Test-PortBusy $Port) {
+                $Port = Find-FreePort ($Port + 1)
+                Write-Warn "Port still busy. Using $Port instead."
+            }
+        } else {
+            Write-Host ""
+            Write-Host "  Leaving it running. In Studio: Plugins -> Rojo -> Connect (port $Port)." -ForegroundColor White
+            Write-Host ""
+            return
+        }
+    } else {
+        $who = if ($owner) { "$($owner.ProcessName) (PID $($owner.Id))" } else { "something else" }
+        Write-Warn "Held by $who, which isn't Rojo."
+        $Port = Find-FreePort ($Port + 1)
+        Write-Warn "Using port $Port instead."
+    }
+}
+
 # --- Serve ----------------------------------------------------------------
 
-Write-Step "Starting the sync server..."
+Write-Step "Starting the sync server on port $Port..."
 Write-Host ""
 Write-Host "  Now, in Roblox Studio:" -ForegroundColor White
 Write-Host "    1. Open any new baseplate place" -ForegroundColor Gray
 Write-Host "    2. Plugins tab -> Rojo -> Connect" -ForegroundColor Gray
+if ($Port -ne 34872) {
+Write-Host "       (change the port to $Port -- it is not the default)" -ForegroundColor Yellow
+}
 Write-Host "    3. Allow the plugin to access localhost when Studio asks" -ForegroundColor Gray
 Write-Host "    4. Press Play" -ForegroundColor Gray
 Write-Host ""
@@ -234,7 +338,11 @@ Write-Host "  Saving a .lua file updates Studio instantly." -ForegroundColor Dar
 Write-Host "  Ctrl+C here stops syncing." -ForegroundColor DarkGray
 Write-Host ""
 
-& $rojo serve
+& $rojo serve --port $Port
+
 if ($LASTEXITCODE -ne 0) {
-    throw "Rojo failed to start. Try .\START-HERE.ps1 -ForceDownload"
+    Write-Host ""
+    Write-Warn "Rojo exited with code $LASTEXITCODE."
+    Write-Warn "If it mentioned 'error binding', another Rojo is still running."
+    Write-Warn "Close the other window, or re-run this script and choose [S]."
 }
