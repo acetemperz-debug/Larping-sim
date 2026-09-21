@@ -124,6 +124,7 @@ Billionaire Mentor.
 ```
 START-HERE.cmd              Windows: double-click this
 START-HERE.ps1              the setup script it runs
+rokit.toml                  pins Rojo for Rokit/Aftman/Foreman users
 default.project.json        Rojo mapping
 src/
   shared/                   ReplicatedStorage.Shared — data, read by both sides

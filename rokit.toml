@@ -1,0 +1,8 @@
+# Toolchain manifest for Rokit (https://github.com/rojo-rbx/rokit) and
+# compatible managers such as Aftman and Foreman.
+#
+# Without this file a Rokit-installed `rojo` shim refuses to run inside this
+# project, reporting "Failed to find tool 'rojo' in any project manifest file".
+
+[tools]
+rojo = "rojo-rbx/rojo@7.5.1"

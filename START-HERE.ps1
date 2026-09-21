@@ -4,7 +4,7 @@
     Sets up and runs LARPing Simulator.
 
 .DESCRIPTION
-    Finds Rojo, downloads it into this folder if it isn't already installed,
+    Finds a working Rojo, downloads one into this folder if it can't find one,
     installs the Roblox Studio plugin, and starts the live-sync server.
 
     Run it again any time you want to start syncing -- it only downloads once.
@@ -16,14 +16,20 @@
 .PARAMETER SkipPlugin
     Don't try to install the Roblox Studio plugin.
 
+.PARAMETER ForceDownload
+    Ignore any Rojo already on your system and fetch a private copy into this
+    folder. Useful if your existing install is misbehaving.
+
 .EXAMPLE
     .\START-HERE.ps1
     .\START-HERE.ps1 -Build
+    .\START-HERE.ps1 -ForceDownload
 #>
 [CmdletBinding()]
 param(
     [switch]$Build,
-    [switch]$SkipPlugin
+    [switch]$SkipPlugin,
+    [switch]$ForceDownload
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,20 +50,81 @@ if (-not (Test-Path 'default.project.json')) {
     throw "default.project.json not found. Run this script from inside the project folder."
 }
 
-# --- Find or fetch Rojo ---------------------------------------------------
+$LocalRojo = Join-Path $PSScriptRoot 'rojo.exe'
 
-function Find-Rojo {
+# --- Finding a Rojo that actually runs ------------------------------------
+
+<#
+    Existing on disk is not the same as working. Toolchain managers (Rokit,
+    Aftman, Foreman) put a shim on PATH that refuses to run unless the project
+    declares the tool, so `rojo` can be present and still fail every command.
+    Everything below tests by execution, never by existence.
+#>
+function Test-Rojo {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+
+    try {
+        $null = & $Path --version 2>&1
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Get-RojoVersion {
+    param([string]$Path)
+    try { return (& $Path --version 2>&1 | Select-Object -First 1) } catch { return 'unknown version' }
+}
+
+# Best-effort: teach the toolchain manager about this project so its shim works.
+function Repair-Toolchain {
+    $rokit = Get-Command rokit -ErrorAction SilentlyContinue
+    if (-not $rokit) { return $false }
+
+    Write-Warn "Found Rokit. Installing this project's tools..."
+
+    # Rokit asks for trust before installing an unfamiliar tool; granting it up
+    # front keeps this non-interactive. Both commands are allowed to fail.
+    try { & $rokit.Source trust 'rojo-rbx/rojo' 2>&1 | Out-Null } catch { }
+    try { & $rokit.Source install 2>&1 | Out-Host } catch { }
+
+    return $true
+}
+
+function Get-WorkingRojo {
+    # 1. A copy we fetched previously. We know this one is real.
+    if ((Test-Path $LocalRojo) -and (Test-Rojo $LocalRojo)) {
+        return $LocalRojo
+    }
+
+    # 2. Whatever is on PATH -- but only if it genuinely runs.
     $onPath = Get-Command rojo -ErrorAction SilentlyContinue
-    if ($onPath) { return $onPath.Source }
+    if ($onPath) {
+        if (Test-Rojo $onPath.Source) {
+            return $onPath.Source
+        }
 
-    $local = Join-Path $PSScriptRoot 'rojo.exe'
-    if (Test-Path $local) { return $local }
+        Write-Warn "Found $($onPath.Source), but it won't run."
+
+        if ($onPath.Source -match '\.rokit|\.aftman|\.foreman') {
+            Write-Warn "That's a toolchain-manager shim, not Rojo itself."
+            if (Repair-Toolchain) {
+                if (Test-Rojo $onPath.Source) {
+                    Write-Ok "Repaired."
+                    return $onPath.Source
+                }
+            }
+            Write-Warn "Still not working. Fetching a private copy instead."
+        }
+    }
 
     return $null
 }
 
 function Install-Rojo {
-    Write-Step "Rojo not found. Downloading the latest Windows build..."
+    Write-Step "Downloading Rojo into this folder..."
 
     $api = 'https://api.github.com/repos/rojo-rbx/rojo/releases/latest'
     try {
@@ -66,9 +133,9 @@ function Install-Rojo {
         throw @"
 Couldn't reach GitHub to download Rojo ($($_.Exception.Message)).
 
-Install it yourself instead, then run this script again:
+Install it yourself, then run this script again:
   https://github.com/rojo-rbx/rojo/releases/latest
-Download the Windows .zip, put rojo.exe next to this script.
+Download the Windows .zip and put rojo.exe next to this script.
 "@
     }
 
@@ -81,30 +148,50 @@ Download the Windows .zip, put rojo.exe next to this script.
         throw "No Windows build in Rojo release $($release.tag_name). Grab it manually from https://github.com/rojo-rbx/rojo/releases/latest"
     }
 
-    Write-Ok "Found $($asset.name) ($($release.tag_name))"
+    Write-Ok "Fetching $($asset.name) ($($release.tag_name))"
 
     $zip = Join-Path $env:TEMP $asset.name
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
-    Expand-Archive -LiteralPath $zip -DestinationPath $PSScriptRoot -Force
-    Remove-Item -LiteralPath $zip -Force
+    $staging = Join-Path $env:TEMP ("rojo-extract-" + [Guid]::NewGuid().ToString('N'))
 
-    $exe = Join-Path $PSScriptRoot 'rojo.exe'
-    if (-not (Test-Path $exe)) {
-        throw "Extracted the download but rojo.exe isn't there. Extract it manually next to this script."
+    try {
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
+        Expand-Archive -LiteralPath $zip -DestinationPath $staging -Force
+
+        # Some releases nest the binary inside a folder, so search for it.
+        $found = Get-ChildItem -LiteralPath $staging -Filter 'rojo.exe' -Recurse |
+            Select-Object -First 1
+
+        if (-not $found) {
+            throw "The download didn't contain rojo.exe. Extract it manually next to this script."
+        }
+
+        Copy-Item -LiteralPath $found.FullName -Destination $LocalRojo -Force
+    } finally {
+        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    Write-Ok "Installed to $exe"
-    return $exe
+    if (-not (Test-Rojo $LocalRojo)) {
+        throw "Downloaded rojo.exe but it won't run. Your system may be blocking it -- try unblocking the file in its Properties."
+    }
+
+    Write-Ok "Installed to $LocalRojo"
+    return $LocalRojo
 }
 
-$rojo = Find-Rojo
-if (-not $rojo) {
+if ($ForceDownload) {
+    Remove-Item -LiteralPath $LocalRojo -Force -ErrorAction SilentlyContinue
     $rojo = Install-Rojo
 } else {
-    Write-Step "Using Rojo at $rojo"
+    $rojo = Get-WorkingRojo
+    if ($rojo) {
+        Write-Step "Using Rojo at $rojo"
+    } else {
+        $rojo = Install-Rojo
+    }
 }
 
-Write-Ok (& $rojo --version)
+Write-Ok (Get-RojoVersion $rojo)
 
 # --- Build and exit, if that's all they wanted ----------------------------
 
@@ -113,8 +200,7 @@ if ($Build) {
     & $rojo build -o 'LarpingSimulator.rbxl'
     if ($LASTEXITCODE -ne 0) { throw "Build failed." }
 
-    $out = Join-Path $PSScriptRoot 'LarpingSimulator.rbxl'
-    Write-Ok "Built $out"
+    Write-Ok "Built $(Join-Path $PSScriptRoot 'LarpingSimulator.rbxl')"
     Write-Host ""
     Write-Host "  Double-click that file to open it in Roblox Studio, then press Play." -ForegroundColor White
     Write-Host ""
@@ -149,3 +235,6 @@ Write-Host "  Ctrl+C here stops syncing." -ForegroundColor DarkGray
 Write-Host ""
 
 & $rojo serve
+if ($LASTEXITCODE -ne 0) {
+    throw "Rojo failed to start. Try .\START-HERE.ps1 -ForceDownload"
+}
